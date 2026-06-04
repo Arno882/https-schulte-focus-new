@@ -1,8 +1,13 @@
 name = "schulte-focus-new"
 main = ".open-next/worker.js"
 compatibility_date = "2026-06-04"
-compatibility_flags = ["nodejs_compat"]
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 
 [assets]
 directory = ".open-next/assets"
 binding = "ASSETS"
+
+[[d1_databases]]
+binding = "schulte_focus_db"
+database_name = "schulte-focus-db"
+database_id = "688efd67-c3b5-4192-b34f-2fec34a7c4f6"
