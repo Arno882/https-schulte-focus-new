@@ -11,3 +11,18 @@ binding = "ASSETS"
 binding = "schulte_focus_db"
 database_name = "schulte-focus-db"
 database_id = "688efd67-c3b5-4192-b34f-2fec34a7c4f6"
+[[ratelimits]]
+name = "GAME_START_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 20
+  period = 60
+
+[[ratelimits]]
+name = "SUBMIT_SCORE_LIMITER"
+namespace_id = "1002"
+
+  [ratelimits.simple]
+  limit = 10
+  period = 60

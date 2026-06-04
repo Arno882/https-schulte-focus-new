@@ -4,6 +4,10 @@ export const dynamic = "force-dynamic";
 
 type ModeKey = "standard" | "reverse";
 
+type RateLimitLike = {
+  limit: (options: { key: string }) => Promise<{ success: boolean }>;
+};
+
 type ChallengeRow = {
   id: string;
   player_name: string;
@@ -37,7 +41,6 @@ type D1DatabaseLike = {
     bind: (...values: unknown[]) => {
       run: () => Promise<D1RunResult>;
       first: <T = unknown>() => Promise<T | null>;
-      all: <T = unknown>() => Promise<{ results?: T[] }>;
     };
   };
 };
@@ -147,6 +150,21 @@ export async function POST(request: Request) {
     }
 
     const { env } = getCloudflareContext();
+    const ip = getClientIp(request);
+
+    const limiter = (env as { SUBMIT_SCORE_LIMITER?: RateLimitLike })
+      .SUBMIT_SCORE_LIMITER;
+
+    if (limiter) {
+      const { success } = await limiter.limit({
+        key: `submit-score:${ip}`,
+      });
+
+      if (!success) {
+        return reject("rate_limited", 429);
+      }
+    }
+
     const db = (env as { schulte_focus_db?: D1DatabaseLike }).schulte_focus_db;
 
     if (!db) {
@@ -155,7 +173,6 @@ export async function POST(request: Request) {
 
     const now = new Date();
     const nowIso = now.toISOString();
-    const ip = getClientIp(request);
 
     const challenge = await db
       .prepare(`
@@ -168,15 +185,19 @@ export async function POST(request: Request) {
       .first<ChallengeRow>();
 
     if (!challenge) return reject("challenge_not_found");
+
     if (challenge.player_name !== playerName) {
       return reject("challenge_player_mismatch");
     }
+
     if (challenge.mode !== mode) {
       return reject("challenge_mode_mismatch");
     }
+
     if (challenge.difficulty !== difficulty) {
       return reject("challenge_difficulty_mismatch");
     }
+
     if (challenge.used_at) {
       return reject("challenge_already_used");
     }

@@ -2,10 +2,14 @@ import { getCloudflareContext } from "@opennextjs/cloudflare";
 
 export const dynamic = "force-dynamic";
 
+type RateLimitLike = {
+  limit: (options: { key: string }) => Promise<{ success: boolean }>;
+};
+
 type D1DatabaseLike = {
   prepare: (query: string) => {
     bind: (...values: unknown[]) => {
-      run: () => Promise<{ success: boolean }>;
+      run: () => Promise<{ success: boolean; meta?: { changes?: number } }>;
     };
   };
 };
@@ -65,6 +69,21 @@ export async function POST(request: Request) {
     }
 
     const { env } = getCloudflareContext();
+    const ip = getClientIp(request);
+
+    const limiter = (env as { GAME_START_LIMITER?: RateLimitLike })
+      .GAME_START_LIMITER;
+
+    if (limiter) {
+      const { success } = await limiter.limit({
+        key: `game-start:${ip}`,
+      });
+
+      if (!success) {
+        return reject("rate_limited", 429);
+      }
+    }
+
     const db = (env as { schulte_focus_db?: D1DatabaseLike }).schulte_focus_db;
 
     if (!db) {
@@ -75,7 +94,6 @@ export async function POST(request: Request) {
     const expiresAt = new Date(now.getTime() + 5 * 60 * 1000);
     const challengeId = crypto.randomUUID();
     const boardSeed = Math.floor(Math.random() * 1000000000000);
-    const ip = getClientIp(request);
 
     await db
       .prepare(`
