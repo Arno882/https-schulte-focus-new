@@ -14,21 +14,28 @@ type ChallengeRow = {
 };
 
 type ExistingScoreRow = {
-  best_time: number;
+  best_time: number | string;
 };
 
 type CountRow = {
-  count: number;
+  count: number | string;
 };
 
 type CutoffRow = {
-  best_time: number;
+  best_time: number | string;
+};
+
+type D1RunResult = {
+  success: boolean;
+  meta?: {
+    changes?: number;
+  };
 };
 
 type D1DatabaseLike = {
   prepare: (query: string) => {
     bind: (...values: unknown[]) => {
-      run: () => Promise<{ success: boolean; meta?: { changes?: number } }>;
+      run: () => Promise<D1RunResult>;
       first: <T = unknown>() => Promise<T | null>;
       all: <T = unknown>() => Promise<{ results?: T[] }>;
     };
@@ -95,6 +102,7 @@ export async function POST(request: Request) {
       clientCompleteTime?: unknown;
       errors?: unknown;
       clickHistory?: unknown;
+      website?: unknown;
     };
 
     const playerName = String(data.playerName ?? "").trim();
@@ -103,9 +111,12 @@ export async function POST(request: Request) {
     const challengeId = String(data.challengeId ?? "").trim();
     const clientCompleteTime = Number(data.clientCompleteTime);
     const errors = Number(data.errors ?? 0);
+    const website = String(data.website ?? "").trim();
     const clickHistory = Array.isArray(data.clickHistory)
       ? (data.clickHistory as ClickItem[])
       : [];
+
+    if (website) return reject("bot_detected");
 
     if (!/^[A-Z]{1,8}#[0-9]{6}$/.test(playerName)) {
       return reject("invalid_player_name");
@@ -157,19 +168,80 @@ export async function POST(request: Request) {
       .first<ChallengeRow>();
 
     if (!challenge) return reject("challenge_not_found");
-    if (challenge.player_name !== playerName) return reject("challenge_player_mismatch");
-    if (challenge.mode !== mode) return reject("challenge_mode_mismatch");
-    if (challenge.difficulty !== difficulty) return reject("challenge_difficulty_mismatch");
-    if (challenge.used_at) return reject("challenge_already_used");
+    if (challenge.player_name !== playerName) {
+      return reject("challenge_player_mismatch");
+    }
+    if (challenge.mode !== mode) {
+      return reject("challenge_mode_mismatch");
+    }
+    if (challenge.difficulty !== difficulty) {
+      return reject("challenge_difficulty_mismatch");
+    }
+    if (challenge.used_at) {
+      return reject("challenge_already_used");
+    }
 
     const expiresAt = new Date(challenge.expires_at);
-    if (Number.isNaN(expiresAt.getTime())) return reject("invalid_challenge_expiry");
-    if (expiresAt.getTime() < now.getTime()) return reject("challenge_expired");
+
+    if (Number.isNaN(expiresAt.getTime())) {
+      return reject("invalid_challenge_expiry");
+    }
+
+    if (expiresAt.getTime() < now.getTime()) {
+      return reject("challenge_expired");
+    }
 
     const safeTime = Number(clientCompleteTime.toFixed(5));
 
+    let riskScore = 0;
+    let pendingReason: string | null = null;
+
+    if (safeTime < 2) {
+      await db
+        .prepare(`
+          INSERT INTO security_events (
+            player_name,
+            challenge_id,
+            ip_address,
+            user_agent,
+            event_type,
+            reason,
+            risk_score,
+            question,
+            player_answer,
+            correct_answer,
+            created_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .bind(
+          playerName,
+          challengeId,
+          ip,
+          request.headers.get("user-agent") ?? "unknown",
+          "submit_score",
+          "under_2_seconds_rejected",
+          999,
+          null,
+          null,
+          null,
+          nowIso
+        )
+        .run();
+
+      return reject("blacklisted_impossible_time");
+    }
+
+    if (safeTime >= 2 && safeTime < 2.5) {
+      riskScore = 200;
+      pendingReason = "under_2_5_seconds_pending_review";
+    }
+
     const correctClicks = clickHistory.filter((item) => item.correct === true);
-    if (correctClicks.length !== 25) return reject("invalid_click_history");
+
+    if (correctClicks.length !== 25) {
+      return reject("invalid_click_history");
+    }
 
     const expectedSequence =
       mode === "reverse"
@@ -180,12 +252,20 @@ export async function POST(request: Request) {
       const item = correctClicks[index];
       const expected = expectedSequence[index];
 
-      if (Number(item.number) !== expected) return reject("invalid_sequence");
-      if (Number(item.expected) !== expected) return reject("invalid_expected");
-      if (item.correct !== true) return reject("invalid_correct");
+      if (Number(item.number) !== expected) {
+        return reject("invalid_sequence");
+      }
+
+      if (Number(item.expected) !== expected) {
+        return reject("invalid_expected");
+      }
+
+      if (item.correct !== true) {
+        return reject("invalid_correct");
+      }
     }
 
-    await db
+    const markUsed = await db
       .prepare(`
         UPDATE score_challenges
         SET used_at = ?,
@@ -209,6 +289,94 @@ export async function POST(request: Request) {
         challengeId
       )
       .run();
+
+    if (!markUsed.success || Number(markUsed.meta?.changes ?? 0) === 0) {
+      return reject("challenge_already_used");
+    }
+
+    if (pendingReason) {
+      await db
+        .prepare(`
+          INSERT INTO security_events (
+            player_name,
+            challenge_id,
+            ip_address,
+            user_agent,
+            event_type,
+            reason,
+            risk_score,
+            question,
+            player_answer,
+            correct_answer,
+            created_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .bind(
+          playerName,
+          challengeId,
+          ip,
+          request.headers.get("user-agent") ?? "unknown",
+          "submit_score",
+          pendingReason,
+          riskScore,
+          null,
+          null,
+          null,
+          nowIso
+        )
+        .run();
+
+      await db
+        .prepare(`
+          INSERT INTO pending_scores (
+            player_name,
+            mode,
+            best_time,
+            errors,
+            risk_score,
+            reason,
+            click_history,
+            ip_address,
+            user_agent,
+            created_at,
+            review_status
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .bind(
+          playerName,
+          mode,
+          safeTime,
+          errors,
+          riskScore,
+          pendingReason,
+          JSON.stringify(clickHistory),
+          ip,
+          request.headers.get("user-agent") ?? "unknown",
+          nowIso,
+          "pending"
+        )
+        .run();
+
+      return Response.json(
+        {
+          accepted: true,
+          pendingReview: true,
+          enteredTop50: false,
+          top50Cutoff: null,
+          secondsBehindTop50: null,
+          rejectedReason: "pending_review",
+          playerName,
+          riskScore,
+        },
+        {
+          headers: {
+            "Cache-Control": "no-store",
+          },
+        }
+      );
+    }
 
     const existing = await db
       .prepare(`
@@ -300,6 +468,7 @@ export async function POST(request: Request) {
 
     const rank = Number(better?.count ?? 0) + 1;
     const totalPlayers = Math.max(Number(total?.count ?? 0), 1);
+
     const beatPercent = Math.max(
       0,
       Math.min(99, Math.floor(((totalPlayers - rank) / totalPlayers) * 100))
